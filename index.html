@@ -108,18 +108,19 @@
       debugResult: document.getElementById('debugResult'),
     };
 
-    const state = {
-      stream: null,
-      rafId: 0,
-      running: false,
-      lastFrameAt: 0,
-      scanning: false,
-      latestTwin: null,
-      latestManagement: null,
-      latestSecondRaw: null,
-      latestSecondMaskNo: null,
-      latestSecondDecodeStage: null,
-    };
+const state = {
+  stream: null,
+  rafId: 0,
+  running: false,
+  starting: false,   // 追加
+  lastFrameAt: 0,
+  scanning: false,
+  latestTwin: null,
+  latestManagement: null,
+  latestSecondRaw: null,
+  latestSecondMaskNo: null,
+  latestSecondDecodeStage: null,
+};
 
     function setStatus(text, cls='') {
       els.appStatus.className = 'status ' + cls;
@@ -230,39 +231,91 @@
       ].join('\n');
     }
 
-    async function startCamera() {
-      stopCamera();
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: 'environment' },
-            width: { ideal: 1920 },
-            height: { ideal: 1080 }
-          },
-          audio: false
-        });
-        state.stream = stream;
-        els.video.srcObject = stream;
-        await els.video.play();
-        state.running = true;
-        setStatus('カメラ起動中', 'ok');
-        tick();
-      } catch (e) {
-        setStatus('カメラ起動失敗', 'err');
-        els.debugResult.textContent = String(e?.message || e);
-      }
+async function startCamera() {
+  if (state.starting) return;
+  if (state.running && state.stream && els.video.srcObject === state.stream) return;
+
+  state.starting = true;
+  setStatus('カメラ起動準備中', 'warn');
+
+  try {
+    // 既存ストリームが残っていたら明示停止
+    if (state.stream) {
+      for (const tr of state.stream.getTracks()) tr.stop();
+      state.stream = null;
     }
 
-    function stopCamera() {
-      state.running = false;
-      if (state.rafId) cancelAnimationFrame(state.rafId);
-      state.rafId = 0;
-      if (state.stream) {
-        for (const tr of state.stream.getTracks()) tr.stop();
-        state.stream = null;
-      }
-      els.video.srcObject = null;
+    state.running = false;
+    if (state.rafId) cancelAnimationFrame(state.rafId);
+    state.rafId = 0;
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 }
+      },
+      audio: false
+    });
+
+    state.stream = stream;
+
+    // ここで初めてセット
+    if (els.video.srcObject !== stream) {
+      els.video.srcObject = stream;
     }
+
+    // metadataが来るのを待つ
+    await new Promise((resolve) => {
+      if (els.video.readyState >= 1) return resolve();
+      const onLoaded = () => {
+        els.video.removeEventListener('loadedmetadata', onLoaded);
+        resolve();
+      };
+      els.video.addEventListener('loadedmetadata', onLoaded, { once: true });
+    });
+
+    try {
+      await els.video.play();
+    } catch (e) {
+      // interrupted系を拾っても、その時点で別ロードが走っただけなので詳細表示
+      throw e;
+    }
+
+    state.running = true;
+    state.lastFrameAt = 0;
+    setStatus('カメラ起動中', 'ok');
+    tick();
+  } catch (e) {
+    state.running = false;
+    setStatus('カメラ起動失敗', 'err');
+    els.debugResult.textContent = String(e?.message || e);
+  } finally {
+    state.starting = false;
+  }
+}
+
+function stopCamera() {
+  state.running = false;
+  state.starting = false;
+
+  if (state.rafId) cancelAnimationFrame(state.rafId);
+  state.rafId = 0;
+
+  if (els.video) {
+    try { els.video.pause(); } catch {}
+  }
+
+  if (state.stream) {
+    for (const tr of state.stream.getTracks()) tr.stop();
+    state.stream = null;
+  }
+
+  if (els.video) {
+    els.video.srcObject = null;
+    // load() は呼ばない
+  }
+}
 
     async function tick() {
       if (!state.running) return;
