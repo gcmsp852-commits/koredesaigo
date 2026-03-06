@@ -340,67 +340,55 @@ function scan(matrix, options) {
     var locations = locator_1.locate(matrix);
     if (!locations)
         return null;
-    var results = [];
+    var results = []; // ★ 追加：結果を格納する配列
     for (var _i = 0, locations_1 = locations; _i < locations_1.length; _i++) {
         var location_1 = locations_1[_i];
         var extracted = extractor_1.extract(matrix, location_1);
-        var decoded = void 0;
-        var isRaw = false;
-        if (options && options.extractRawOnly) {
-            // オプションで強制的に生データを要求された場合
-            decoded = decoder_1.decode(extracted.matrix, options);
-            isRaw = true;
-        }
-        else {
-            // 1. すべての候補に対して、まず通常の誤り訂正（デコード）を試みる
-            decoded = decoder_1.decode(extracted.matrix, options);
-            // 2. 誤り訂正に失敗した場合、捨てずに「生データ（RAW）」として再抽出する
-            if (!decoded) {
-                decoded = decoder_1.decode(extracted.matrix, __assign({}, options, { extractRawOnly: true }));
-                isRaw = true;
-            }
-        }
+        var decoded = decoder_1.decode(extracted.matrix, options);
         if (decoded) {
-            var locationObj = {
-                topRightCorner: extracted.mappingFunction(location_1.dimension, 0),
-                topLeftCorner: extracted.mappingFunction(0, 0),
-                bottomRightCorner: extracted.mappingFunction(location_1.dimension, location_1.dimension),
-                bottomLeftCorner: extracted.mappingFunction(0, location_1.dimension),
-                topRightFinderPattern: location_1.topRight,
-                topLeftFinderPattern: location_1.topLeft,
-                bottomLeftFinderPattern: location_1.bottomLeft,
-                bottomRightAlignmentPattern: location_1.alignmentPattern,
-            };
             var res = void 0;
-            if (isRaw) {
-                // 【誤り訂正に失敗した候補】
-                // 生データとしてブラウザに返す
-                res = __assign({}, decoded, { raw: decoded, data: null, location: locationObj });
+            if (options && options.extractRawOnly) {
+                res = __assign({}, decoded, { location: {
+                        topRightCorner: extracted.mappingFunction(location_1.dimension, 0),
+                        topLeftCorner: extracted.mappingFunction(0, 0),
+                        bottomRightCorner: extracted.mappingFunction(location_1.dimension, location_1.dimension),
+                        bottomLeftCorner: extracted.mappingFunction(0, location_1.dimension),
+                        topRightFinderPattern: location_1.topRight,
+                        topLeftFinderPattern: location_1.topLeft,
+                        bottomLeftFinderPattern: location_1.bottomLeft,
+                        bottomRightAlignmentPattern: location_1.alignmentPattern,
+                    } });
             }
             else {
-                // 【誤り訂正に成功した候補】
-                // 本物のQRコードとしてブラウザに返す
                 res = {
                     binaryData: decoded.bytes,
                     data: decoded.text,
                     chunks: decoded.chunks,
                     version: decoded.version,
                     managementCode: decoded.managementCode,
-                    location: locationObj,
+                    location: {
+                        topRightCorner: extracted.mappingFunction(location_1.dimension, 0),
+                        topLeftCorner: extracted.mappingFunction(0, 0),
+                        bottomRightCorner: extracted.mappingFunction(location_1.dimension, location_1.dimension),
+                        bottomLeftCorner: extracted.mappingFunction(0, location_1.dimension),
+                        topRightFinderPattern: location_1.topRight,
+                        topLeftFinderPattern: location_1.topLeft,
+                        bottomLeftFinderPattern: location_1.bottomLeft,
+                        bottomRightAlignmentPattern: location_1.alignmentPattern,
+                    },
                     matrix: matrix,
-                    raw: decoded // オプションとして生データも含めておく
                 };
             }
             if (options && options.multi) {
-                results.push(res);
+                results.push(res); // ★ multiモードなら配列に追加して続行
             }
             else {
-                return res;
+                return res; // ★ 従来通り1つ目で終了
             }
         }
     }
     if (options && options.multi) {
-        return results.length > 0 ? results : null;
+        return results.length > 0 ? results : null; // ★ multiモードなら配列を返す
     }
     return null;
 }
@@ -10056,7 +10044,7 @@ function locate(matrix) {
     // ★ 改良点：QRツインの密集したマーク群から、正しい3つだけを幾何学的に抽出する
     // ▼▼ src/locator/index.ts の下部を上書き ▼▼
     // ★ 候補を少し増やして、見落としを防ぐ
-    var topFinderPatterns = validFinderPatterns.slice(0, 10);
+    var topFinderPatterns = validFinderPatterns.slice(0, 20);
     var finderPatternGroups = [];
     var len = topFinderPatterns.length;
     for (var i = 0; i < len - 2; i++) {
@@ -10065,10 +10053,10 @@ function locate(matrix) {
                 var p1 = topFinderPatterns[i];
                 var p2 = topFinderPatterns[j];
                 var p3 = topFinderPatterns[k];
-                // ① サイズのチェック（0.6: 多少の遠近感は許容しつつ、違うマークは弾く）
+                // ① サイズのチェック（ピンボケを考慮して許容範囲を 0.5 -> 1.0 に緩和）
                 var sizeAvg = (p1.size + p2.size + p3.size) / 3;
                 var sizeErr = (Math.abs(p1.size - sizeAvg) + Math.abs(p2.size - sizeAvg) + Math.abs(p3.size - sizeAvg)) / sizeAvg;
-                if (sizeErr > 0.6)
+                if (sizeErr > 1.0)
                     continue;
                 // ② 配置のチェック
                 var _a = reorderFinderPatterns(p1, p2, p3), topRight = _a.topRight, topLeft = _a.topLeft, bottomLeft = _a.bottomLeft;
@@ -10077,17 +10065,17 @@ function locate(matrix) {
                 var diag = distance(topRight, bottomLeft);
                 if (topSide === 0 || leftSide === 0)
                     continue;
-                // ★ 縦と横の長さの比率（0.7 〜 1.4 の「適度な厳しさ」に戻す）
+                // ★ 縦と横の長さの比率（スマホを斜めに構えた時の歪みを考慮し、0.4 〜 2.5 と大幅に緩和）
                 var ratio = topSide / leftSide;
-                if (ratio < 0.7 || ratio > 1.4)
+                if (ratio < 0.4 || ratio > 2.5)
                     continue;
-                // ★ 直角かどうか（0.7 〜 1.4）
+                // ★ 直角かどうか（これも斜め撮影を考慮して 0.4 〜 2.5 に緩和）
                 var angleRatio = (diag * diag) / (topSide * topSide + leftSide * leftSide);
-                if (angleRatio < 0.7 || angleRatio > 1.4)
+                if (angleRatio < 0.4 || angleRatio > 2.5)
                     continue;
-                // 幾何学的な「歪み」のペナルティ
+                // 幾何学的な「歪み」のペナルティを軽くし、多少歪んでいてもデコード処理へ回す（50 -> 10）
                 var geoErr = Math.abs(1 - ratio) + Math.abs(1 - angleRatio);
-                var totalScore = p1.score + p2.score + p3.score + geoErr * 20;
+                var totalScore = p1.score + p2.score + p3.score + geoErr * 10;
                 finderPatternGroups.push({ points: [p1, p2, p3], score: totalScore });
             }
         }
@@ -10097,8 +10085,8 @@ function locate(matrix) {
         return null;
     }
     var result = [];
-    // ★ デコード処理に回すのは、最も形が綺麗な「上位4セット」のみに限定（QRは最大2つなので4つで十分）
-    var groupsToProcess = finderPatternGroups.slice(0, 4);
+    // ★ 歪んだQRも拾えるように、処理に回すグループ数を増やす（6 -> 10）
+    var groupsToProcess = finderPatternGroups.slice(0, 10);
     for (var _i = 0, groupsToProcess_1 = groupsToProcess; _i < groupsToProcess_1.length; _i++) {
         var group = groupsToProcess_1[_i];
         var _b = reorderFinderPatterns(group.points[0], group.points[1], group.points[2]), topRight = _b.topRight, topLeft = _b.topLeft, bottomLeft = _b.bottomLeft;

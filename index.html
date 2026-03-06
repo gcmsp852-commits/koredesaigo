@@ -69,7 +69,7 @@
     </div>
 
     <div class="status-panel" id="statusPanel">
-        <div id="detectorInfo" style="font-size: 0.8rem; color: #03DAC6; font-weight: bold; margin-bottom: 10px;">⚡ エンジン: カスタム jsQR (完全バグフィックス版)</div>
+        <div id="detectorInfo" style="font-size: 0.8rem; color: #03DAC6; font-weight: bold; margin-bottom: 10px;">⚡ エンジン: カスタム jsQR (高バージョン対応版)</div>
         <div class="qr-result qr-1">
             <strong>1個目:</strong> <span id="text1">未検出</span><br>
             <span style="font-size: 0.85em; color: #ccc;">管理部16bit: <span id="mg1">--</span></span>
@@ -111,10 +111,10 @@
         return out;
     }
 
-    // --- 変数定義 ---
     const video = document.getElementById('video');
     const overlayCanvas = document.getElementById('overlayCanvas');
     const ctx = overlayCanvas.getContext('2d');
+    
     const zxingCanvas = document.createElement('canvas');
     const zxingCtx = zxingCanvas.getContext('2d', { willReadFrequently: true });
 
@@ -130,19 +130,7 @@
     let appMask = null;
     let savedRawCandidates = [];
 
-    // --- 計算用ユーティリティ関数 ---
-    function getPts(obj) {
-        if (!obj || !obj.location) return [];
-        return [obj.location.topLeftCorner, obj.location.topRightCorner, obj.location.bottomRightCorner, obj.location.bottomLeftCorner];
-    }
-
-    function getCenter(points) {
-        if (!points || points.length === 0) return { x: 0, y: 0 };
-        let sumX = 0, sumY = 0;
-        points.forEach(p => { sumX += p.x; sumY += p.y; });
-        return { x: sumX / points.length, y: sumY / points.length };
-    }
-
+    // --- 計算用ユーティリティ ---
     function getDistance(p1, p2) {
         if (!p1 || !p2) return 0;
         return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
@@ -155,68 +143,93 @@
         return 0;
     }
 
-    // ▼▼▼ トラッキングアルゴリズム ▼▼▼
+    function getPts(obj) {
+        if (!obj || !obj.location) return [];
+        return [obj.location.topLeftCorner, obj.location.topRightCorner, obj.location.bottomRightCorner, obj.location.bottomLeftCorner];
+    }
+
+    function getCenter(points) {
+        if (!points || points.length === 0) return { x: 0, y: 0 };
+        let sumX = 0, sumY = 0;
+        points.forEach(p => { sumX += p.x; sumY += p.y; });
+        return { x: sumX / points.length, y: sumY / points.length };
+    }
+
+    // ★高バージョン対応の「別QR判定」関数
+    function isDifferentSecondCandidate(first, cand) {
+        if (!first || !cand || !first.center || !cand.center) return false;
+
+        // 両方とも解読済みで、テキストが完全に同じなら問答無用で「二重読み」
+        if (cand.text && first.text && cand.text === first.text) {
+            return false;
+        }
+
+        const d = getDistance(first.center, cand.center);
+        const qrSize = estimateQrSize(cand) || estimateQrSize(first) || 0;
+        
+        // ★重要変更：Ver40などの巨大QRでも 8.5モジュールのズレを検知できるように、
+        // 閾値を「サイズの50%」から「サイズの4%（かつ最低10px）」まで大幅に引き下げました。
+        const distanceThreshold = Math.max(10, qrSize * 0.04);
+
+        return d > distanceThreshold;
+    }
+
+    // ▼ トラッキング関数（高Ver対応版） ▼
     function processDetections(items) {
         if (items.length === 0) return;
 
-        for (const item of items) {
-            // 1. まだ何も見つかっていない場合
+        if (items.length >= 2) {
             if (!firstQR) {
-                if (item.text) { // テキストがある本物だけを第1QRにする
-                    firstQR = item;
-                    updateUI();
-                }
-                continue;
-            }
-
-            // 2. テキストが完全に一致する場合は、絶対に第1QRの移動として処理する（二重読み防止）
-            if (item.text && item.text === firstQR.text) {
-                firstQR.points = item.points;
-                firstQR.center = item.center;
+                firstQR = items[0];
+                secondQR = items[1];
                 updateUI();
-                continue;
+                return;
             }
-
-            // 3. すでに両方の枠が存在する場合の追従アップデート
-            if (firstQR && secondQR) {
-                const distToFirst = getDistance(firstQR.center, item.center);
-                const distToSecond = getDistance(secondQR.center, item.center);
-
-                if (distToFirst < distToSecond) {
-                    firstQR.points = item.points;
-                    firstQR.center = item.center;
-                    if (item.text) firstQR.text = item.text;
-                } else {
-                    secondQR.points = item.points;
-                    secondQR.center = item.center;
-                    if (item.text) secondQR.text = item.text;
-                }
-                updateUI();
-                continue;
-            }
-
-            // 4. 第1QRはあり、第2QRがまだ無い場合（ここで暗号QRを認定！）
             if (firstQR && !secondQR) {
-                const size1 = estimateQrSize(firstQR);
-                const size2 = estimateQrSize(item);
-                const dist = getDistance(firstQR.center, item.center);
-
-                // 【ノイズフィルター】第1QRのサイズと位置を基準にする
-                if (size1 > 0 && size2 > 0) {
-                    if (size2 < size1 * 0.4 || size2 > size1 * 2.5) continue; // サイズ違いはゴミ
-                    if (dist < size1 * 0.5) continue; // 近すぎるのは第1QRの誤検知
-                    if (dist > size1 * 6.0) continue; // 遠すぎるのは背景のノイズ
+                const dist0 = getDistance(firstQR.center, items[0].center);
+                const dist1 = getDistance(firstQR.center, items[1].center);
+                if (dist0 > dist1) {
+                    secondQR = items[0];
+                    firstQR = items[1]; 
+                } else {
+                    secondQR = items[1];
+                    firstQR = items[0]; 
                 }
-
-                // 全ての条件をクリアした生データ（または別テキスト）を第2QRとする
-                secondQR = item;
                 updateUI();
+                return;
+            }
+        }
+
+        if (items.length === 1) {
+            const item = items[0];
+            
+            if (!firstQR) {
+                firstQR = item;
+                updateUI();
+            } else if (!secondQR) {
+                if (item.text && firstQR.text && item.text !== firstQR.text) {
+                    secondQR = item;
+                    updateUI();
+                } else {
+                    const dist = getDistance(firstQR.center, item.center);
+                    const qrSize = estimateQrSize(item);
+                    
+                    // ★ここも重要変更：追従する距離の閾値を小さくしました
+                    const distanceThreshold = Math.max(10, qrSize * 0.04);
+
+                    if (dist > distanceThreshold) {
+                        secondQR = item;
+                        updateUI();
+                    } else {
+                        firstQR.points = item.points;
+                        firstQR.center = item.center;
+                    }
+                }
             }
         }
     }
-    // ▲▲▲ トラッキングアルゴリズム終了 ▲▲▲
 
-    // --- カメラ起動処理 ---
+
     async function startApp() {
         const startBtn = document.getElementById('startBtn');
         startBtn.disabled = true;
@@ -249,6 +262,7 @@
                 video.onloadedmetadata = resolve;
                 setTimeout(resolve, 1000); 
             });
+            
             await video.play().catch(e => console.warn("自動再生ブロック:", e));
             
             isScanning = true;
@@ -260,114 +274,6 @@
         }
     }
 
-    // ▼▼▼ スキャンループ ▼▼▼
-    async function scanLoop() {
-        if (!isScanning) return;
-
-        if (video.videoWidth && overlayCanvas.width !== video.videoWidth) {
-            overlayCanvas.width = video.videoWidth;
-            overlayCanvas.height = video.videoHeight;
-        }
-
-        ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-        
-        // 枠線の描画
-        if (firstQR) drawBoundingBox(firstQR.points, '#00E676');
-        if (secondQR) drawBoundingBox(secondQR.points, '#29B6F6');
-
-        const now = Date.now();
-        if (!isProcessing && now - lastDetectTime > SCAN_INTERVAL_MS && video.readyState >= 2) {
-            isProcessing = true;
-            lastDetectTime = now;
-
-            try {
-                zxingCanvas.width = overlayCanvas.width;
-                zxingCanvas.height = overlayCanvas.height;
-                zxingCtx.drawImage(video, 0, 0, zxingCanvas.width, zxingCanvas.height);
-                const imageData = zxingCtx.getImageData(0, 0, zxingCanvas.width, zxingCanvas.height);
-
-                const rawItems = jsQR(imageData.data, imageData.width, imageData.height, { 
-                    inversionAttempts: "attemptBoth", 
-                    multi: true 
-                });
-
-                if (rawItems && rawItems.length > 0) {
-                    let detectionItems = [];
-
-                    for (const item of rawItems) {
-                        const pts = getPts(item);
-                        const center = getCenter(pts);
-
-                        if (item.data) {
-                            // デコード成功（第1QR、または復号後の第2QR）
-                            detectionItems.push({ text: item.data, managementCode: item.managementCode, points: pts, center: center, raw: item.raw });
-                        } else if (item.raw) {
-                            // デコード失敗（暗号化された第2QRの生データ候補）
-                            let decodedText = null;
-                            let decodedMgmt = undefined;
-
-                            // パスワード入力済みなら暗号解除を試みる
-                            if (appMask && (!secondQR || !secondQR.text)) {
-                                try {
-                                    // 万が一復号関数がエラーを吐いても止まらないようにtry-catch
-                                    let decodedWithKey = jsQR.resumeDecode(item.raw, Array.from(appMask));
-                                    if (decodedWithKey) {
-                                        decodedText = decodedWithKey.text;
-                                        decodedMgmt = decodedWithKey.managementCode;
-                                    }
-                                } catch (e) {
-                                    console.error("Decrypt error", e);
-                                }
-                            }
-                            detectionItems.push({ text: decodedText, managementCode: decodedMgmt, points: pts, center: center, raw: item.raw });
-                        }
-                    }
-
-                    // 確実にテキストがあるものを優先処理するためのソート
-                    detectionItems.sort((a, b) => (b.text ? 1 : 0) - (a.text ? 1 : 0));
-
-                    // トラッキング実行
-                    processDetections(detectionItems);
-
-                    // パスワード画面の呼び出し判定
-                    if (firstQR && secondQR && !appPassword) {
-                        // ★バグ修正：managementCodeが「null」の場合でもエラーで止まらないように堅牢にチェック
-                        const mgmtStr = (firstQR.managementCode != null) ? 
-                                        Number(firstQR.managementCode).toString(2).padStart(16, '0') : "0000000000000000";
-                        
-                        // 第1QRに暗号化ビットがあり、かつ第2QRが未解読（生データ）の場合
-                        if (mgmtStr[7] === '1' && !secondQR.text) {
-                            savedRawCandidates = [{ raw: secondQR.raw, points: secondQR.points, center: secondQR.center }]; 
-                            secondQR = null; 
-                            
-                            if (document.getElementById('passwordScreen').style.display !== 'flex') {
-                                showPasswordScreen();
-                                isProcessing = false;
-                                return;
-                            }
-                        } else if (mgmtStr[7] !== '1' && !secondQR.text) {
-                            secondQR = null; // 暗号化指定がないのに拾ったゴミは捨てる
-                        }
-                    }
-                }
-            } catch (err) {
-                console.error("Scan error:", err);
-            }
-            isProcessing = false;
-        }
-
-        // 両方のQRが解読完了したら結果画面へ
-        if (firstQR && secondQR && firstQR.text && secondQR.text) {
-            showResultScreen();
-            isScanning = false;
-            return;
-        }
-
-        requestAnimationFrame(scanLoop);
-    }
-    // ▲▲▲ スキャンループ終了 ▲▲▲
-
-    // --- パスワード・UI関連処理 ---
     function showPasswordScreen() {
         isScanning = false; 
         document.getElementById('appPasswordInput').value = "";
@@ -388,47 +294,158 @@
         appPassword = pw;
         appMask = deriveEncryptionMaskBytes(appPassword, 5000);
 
+        let success = false;
+        secondQR = null;
+
         if (savedRawCandidates && savedRawCandidates.length > 0) {
-            const candidate = savedRawCandidates[0];
-            try {
-                const decoded = jsQR.resumeDecode(candidate.raw, Array.from(appMask));
+            for (let i = 0; i < savedRawCandidates.length; i++) {
+                const candidateRaw = savedRawCandidates[i];
+                const pts = getPts(candidateRaw);
+                const center = getCenter(pts);
+                
+                const candMock = { center: center, text: null, points: pts }; 
+                if (!isDifferentSecondCandidate(firstQR, candMock)) continue; 
+
+                const decoded = jsQR.resumeDecode(candidateRaw, Array.from(appMask));
+
                 if (decoded) {
-                    secondQR = { 
-                        text: decoded.text, 
-                        managementCode: decoded.managementCode, 
-                        points: candidate.points,
-                        center: candidate.center 
-                    };
-                    updateUI();
-                    document.getElementById('passwordScreen').style.display = 'none';
-                    showResultScreen();
-                    return;
+                    secondQR = { text: decoded.text, managementCode: decoded.managementCode, points: pts, center: center };
+                    success = true;
+                    break;
                 }
-            } catch (e) {
-                console.error("Initial decrypt error", e);
             }
         }
         
-        // 失敗した場合はエラーを出さずに、パスワードを保持したままカメラを再開
-        document.getElementById('passwordScreen').style.display = 'none';
-        isScanning = true;
-        lastDetectTime = Date.now(); 
+        if (success) {
+            updateUI();
+            document.getElementById('passwordScreen').style.display = 'none';
+            showResultScreen();
+        } else {
+            document.getElementById('passwordScreen').style.display = 'none';
+            isScanning = true;
+            lastDetectTime = Date.now(); 
+            requestAnimationFrame(scanLoop);
+        }
+    }
+
+    async function scanLoop() {
+        if (!isScanning) return;
+
+        if (video.videoWidth && overlayCanvas.width !== video.videoWidth) {
+            overlayCanvas.width = video.videoWidth;
+            overlayCanvas.height = video.videoHeight;
+        }
+
+        ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+        if (firstQR) drawBoundingBox(firstQR.points, '#00E676');
+        if (secondQR) drawBoundingBox(secondQR.points, '#29B6F6');
+
+        const now = Date.now();
+        if (!isProcessing && now - lastDetectTime > SCAN_INTERVAL_MS && video.readyState >= 2) {
+            isProcessing = true;
+            lastDetectTime = now;
+            
+            let validDecodedItems = [];
+            let rawUnrecognizedItems = []; 
+
+            try {
+                zxingCanvas.width = overlayCanvas.width;
+                zxingCanvas.height = overlayCanvas.height;
+                zxingCtx.drawImage(video, 0, 0, zxingCanvas.width, zxingCanvas.height);
+                const imageData = zxingCtx.getImageData(0, 0, zxingCanvas.width, zxingCanvas.height);
+
+                const rawItems = jsQR(imageData.data, imageData.width, imageData.height, { 
+                    inversionAttempts: "attemptBoth", 
+                    extractRawOnly: true, 
+                    multi: true 
+                });
+
+                if (rawItems && rawItems.length > 0) {
+                    for (const raw of rawItems) {
+                        let decoded = jsQR.resumeDecode(raw, null);
+                        
+                        if (!decoded && appMask) {
+                            decoded = jsQR.resumeDecode(raw, Array.from(appMask));
+                        }
+
+                        const pts = getPts(raw);
+                        const center = getCenter(pts);
+
+                        if (decoded) {
+                            validDecodedItems.push({ text: decoded.text, managementCode: decoded.managementCode, points: pts, center: center });
+                        } else {
+                            rawUnrecognizedItems.push({ text: null, points: pts, center: center, raw: raw });
+                        }
+                    }
+                    savedRawCandidates = rawItems;
+                }
+            } catch (err) {
+                console.error("Scan error:", err);
+            }
+
+            for (const item of validDecodedItems) {
+                if (!firstQR) {
+                    firstQR = item;
+                } else if (!secondQR) {
+                    if (isDifferentSecondCandidate(firstQR, item)) {
+                        secondQR = item;
+                    } else {
+                        firstQR.points = item.points;
+                        firstQR.center = item.center;
+                    }
+                }
+            }
+            updateUI();
+
+            if (firstQR && !appPassword) {
+                const mgmtStr = firstQR.managementCode !== undefined ? 
+                                firstQR.managementCode.toString(2).padStart(16, '0') : "0000000000000000";
+                
+                if (mgmtStr[7] === '1') {
+                    let isRawSecondQRVisible = false;
+                    const size1 = estimateQrSize(firstQR);
+
+                    for (const rawCand of rawUnrecognizedItems) {
+                        const size2 = estimateQrSize(rawCand);
+                        
+                        // 第1QRのサイズの30%〜300%の範囲のみ許可（ノイズ除去）
+                        if (size2 < size1 * 0.3 || size2 > size1 * 3.0) continue;
+
+                        if (isDifferentSecondCandidate(firstQR, rawCand)) {
+                            isRawSecondQRVisible = true;
+                            break;
+                        }
+                    }
+
+                    if (isRawSecondQRVisible && document.getElementById('passwordScreen').style.display !== 'flex') {
+                        secondQR = null; 
+                        showPasswordScreen();
+                        isProcessing = false;
+                        return; 
+                    }
+                }
+            }
+
+            isProcessing = false;
+        }
+
+        if (firstQR && secondQR) {
+            showResultScreen();
+            isScanning = false;
+            return;
+        }
+
         requestAnimationFrame(scanLoop);
     }
 
     function updateUI() {
         if (firstQR) {
-            document.getElementById('text1').innerText = firstQR.text || "未検出";
-            document.getElementById('mg1').innerText = (firstQR.managementCode != null) ? Number(firstQR.managementCode).toString(2).padStart(16, '0') : "なし";
+            document.getElementById('text1').innerText = firstQR.text;
+            document.getElementById('mg1').innerText = firstQR.managementCode !== undefined ? firstQR.managementCode.toString(2).padStart(16, '0') : "なし";
         }
         if (secondQR) {
-            // ★機能追加：パスワード入力済みなのに解読できていない場合、赤字で警告を出す
-            if (appPassword && !secondQR.text) {
-                document.getElementById('text2').innerHTML = "<span style='color: #ff5252;'>🔒復号失敗 (パスワード誤り等)</span>";
-            } else {
-                document.getElementById('text2').innerText = secondQR.text || "暗号データ(未解読)";
-            }
-            document.getElementById('mg2').innerText = (secondQR.managementCode != null) ? Number(secondQR.managementCode).toString(2).padStart(16, '0') : "なし";
+            document.getElementById('text2').innerText = secondQR.text || "暗号データ(未解読)";
+            document.getElementById('mg2').innerText = secondQR.managementCode !== undefined ? secondQR.managementCode.toString(2).padStart(16, '0') : "なし";
         }
     }
 
@@ -449,8 +466,8 @@
         document.getElementById('resultScreen').style.display = 'block';
         document.getElementById('finalText1').innerHTML = formatResultText(firstQR.text);
         document.getElementById('finalText2').innerHTML = formatResultText(secondQR.text);
-        document.getElementById('finalMg1').innerText = (firstQR.managementCode != null) ? Number(firstQR.managementCode).toString(2).padStart(16, '0') : "なし";
-        document.getElementById('finalMg2').innerText = (secondQR.managementCode != null) ? Number(secondQR.managementCode).toString(2).padStart(16, '0') : "なし";
+        document.getElementById('finalMg1').innerText = firstQR.managementCode !== undefined ? firstQR.managementCode.toString(2).padStart(16, '0') : "なし";
+        document.getElementById('finalMg2').innerText = secondQR.managementCode !== undefined ? secondQR.managementCode.toString(2).padStart(16, '0') : "なし";
     }
 
     function goBack() {
