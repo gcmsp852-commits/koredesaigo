@@ -69,7 +69,7 @@
     </div>
 
     <div class="status-panel" id="statusPanel">
-        <div id="detectorInfo" style="font-size: 0.8rem; color: #03DAC6; font-weight: bold; margin-bottom: 10px;">⚡ エンジン: カスタム jsQR (二重読み防止機能付き)</div>
+        <div id="detectorInfo" style="font-size: 0.8rem; color: #03DAC6; font-weight: bold; margin-bottom: 10px;">⚡ エンジン: カスタム jsQR (完全バグフィックス版)</div>
         <div class="qr-result qr-1">
             <strong>1個目:</strong> <span id="text1">未検出</span><br>
             <span style="font-size: 0.85em; color: #ccc;">管理部16bit: <span id="mg1">--</span></span>
@@ -155,7 +155,7 @@
         return 0;
     }
 
-    // ▼▼▼ 【修正版】二重読みを完全に防ぐトラッキングアルゴリズム ▼▼▼
+    // ▼▼▼ トラッキングアルゴリズム ▼▼▼
     function processDetections(items) {
         if (items.length === 0) return;
 
@@ -169,7 +169,7 @@
                 continue;
             }
 
-            // 2. 【バグ修正の要】テキストが完全に一致する場合は、絶対に第1QRの移動として処理する（二重読み防止）
+            // 2. テキストが完全に一致する場合は、絶対に第1QRの移動として処理する（二重読み防止）
             if (item.text && item.text === firstQR.text) {
                 firstQR.points = item.points;
                 firstQR.center = item.center;
@@ -306,11 +306,17 @@
                             let decodedText = null;
                             let decodedMgmt = undefined;
 
+                            // パスワード入力済みなら暗号解除を試みる
                             if (appMask && (!secondQR || !secondQR.text)) {
-                                let decodedWithKey = jsQR.resumeDecode(item.raw, Array.from(appMask));
-                                if (decodedWithKey) {
-                                    decodedText = decodedWithKey.text;
-                                    decodedMgmt = decodedWithKey.managementCode;
+                                try {
+                                    // 万が一復号関数がエラーを吐いても止まらないようにtry-catch
+                                    let decodedWithKey = jsQR.resumeDecode(item.raw, Array.from(appMask));
+                                    if (decodedWithKey) {
+                                        decodedText = decodedWithKey.text;
+                                        decodedMgmt = decodedWithKey.managementCode;
+                                    }
+                                } catch (e) {
+                                    console.error("Decrypt error", e);
                                 }
                             }
                             detectionItems.push({ text: decodedText, managementCode: decodedMgmt, points: pts, center: center, raw: item.raw });
@@ -325,8 +331,9 @@
 
                     // パスワード画面の呼び出し判定
                     if (firstQR && secondQR && !appPassword) {
-                        const mgmtStr = firstQR.managementCode !== undefined ? 
-                                        firstQR.managementCode.toString(2).padStart(16, '0') : "0000000000000000";
+                        // ★バグ修正：managementCodeが「null」の場合でもエラーで止まらないように堅牢にチェック
+                        const mgmtStr = (firstQR.managementCode != null) ? 
+                                        Number(firstQR.managementCode).toString(2).padStart(16, '0') : "0000000000000000";
                         
                         // 第1QRに暗号化ビットがあり、かつ第2QRが未解読（生データ）の場合
                         if (mgmtStr[7] === '1' && !secondQR.text) {
@@ -349,6 +356,7 @@
             isProcessing = false;
         }
 
+        // 両方のQRが解読完了したら結果画面へ
         if (firstQR && secondQR && firstQR.text && secondQR.text) {
             showResultScreen();
             isScanning = false;
@@ -382,22 +390,26 @@
 
         if (savedRawCandidates && savedRawCandidates.length > 0) {
             const candidate = savedRawCandidates[0];
-            const decoded = jsQR.resumeDecode(candidate.raw, Array.from(appMask));
-            
-            if (decoded) {
-                secondQR = { 
-                    text: decoded.text, 
-                    managementCode: decoded.managementCode, 
-                    points: candidate.points,
-                    center: candidate.center 
-                };
-                updateUI();
-                document.getElementById('passwordScreen').style.display = 'none';
-                showResultScreen();
-                return;
+            try {
+                const decoded = jsQR.resumeDecode(candidate.raw, Array.from(appMask));
+                if (decoded) {
+                    secondQR = { 
+                        text: decoded.text, 
+                        managementCode: decoded.managementCode, 
+                        points: candidate.points,
+                        center: candidate.center 
+                    };
+                    updateUI();
+                    document.getElementById('passwordScreen').style.display = 'none';
+                    showResultScreen();
+                    return;
+                }
+            } catch (e) {
+                console.error("Initial decrypt error", e);
             }
         }
         
+        // 失敗した場合はエラーを出さずに、パスワードを保持したままカメラを再開
         document.getElementById('passwordScreen').style.display = 'none';
         isScanning = true;
         lastDetectTime = Date.now(); 
@@ -407,11 +419,16 @@
     function updateUI() {
         if (firstQR) {
             document.getElementById('text1').innerText = firstQR.text || "未検出";
-            document.getElementById('mg1').innerText = firstQR.managementCode !== undefined ? firstQR.managementCode.toString(2).padStart(16, '0') : "なし";
+            document.getElementById('mg1').innerText = (firstQR.managementCode != null) ? Number(firstQR.managementCode).toString(2).padStart(16, '0') : "なし";
         }
         if (secondQR) {
-            document.getElementById('text2').innerText = secondQR.text || "未検出";
-            document.getElementById('mg2').innerText = secondQR.managementCode !== undefined ? secondQR.managementCode.toString(2).padStart(16, '0') : "なし";
+            // ★機能追加：パスワード入力済みなのに解読できていない場合、赤字で警告を出す
+            if (appPassword && !secondQR.text) {
+                document.getElementById('text2').innerHTML = "<span style='color: #ff5252;'>🔒復号失敗 (パスワード誤り等)</span>";
+            } else {
+                document.getElementById('text2').innerText = secondQR.text || "暗号データ(未解読)";
+            }
+            document.getElementById('mg2').innerText = (secondQR.managementCode != null) ? Number(secondQR.managementCode).toString(2).padStart(16, '0') : "なし";
         }
     }
 
@@ -432,8 +449,8 @@
         document.getElementById('resultScreen').style.display = 'block';
         document.getElementById('finalText1').innerHTML = formatResultText(firstQR.text);
         document.getElementById('finalText2').innerHTML = formatResultText(secondQR.text);
-        document.getElementById('finalMg1').innerText = firstQR.managementCode !== undefined ? firstQR.managementCode.toString(2).padStart(16, '0') : "なし";
-        document.getElementById('finalMg2').innerText = secondQR.managementCode !== undefined ? secondQR.managementCode.toString(2).padStart(16, '0') : "なし";
+        document.getElementById('finalMg1').innerText = (firstQR.managementCode != null) ? Number(firstQR.managementCode).toString(2).padStart(16, '0') : "なし";
+        document.getElementById('finalMg2').innerText = (secondQR.managementCode != null) ? Number(secondQR.managementCode).toString(2).padStart(16, '0') : "なし";
     }
 
     function goBack() {
